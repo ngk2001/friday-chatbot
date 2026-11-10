@@ -2,8 +2,9 @@
 
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Bot, User, Copy, Check, Terminal } from "lucide-react";
+import { Bot, User, Copy, Check, Terminal, Volume2, VolumeX } from "lucide-react";
 import { useState } from "react";
+import { speakText, stopSpeaking, isSpeechSynthesisSupported } from "@/lib/voiceUtils";
 
 interface ChatMessageProps {
   role: "user" | "assistant";
@@ -22,12 +23,25 @@ export default function ChatMessage({
 }: ChatMessageProps) {
   const [copied, setCopied] = useState(false);
   const [zoomed, setZoomed] = useState(false);
+  const [speaking, setSpeaking] = useState(false);
   const isAssistant = role === "assistant";
 
   const handleCopy = () => {
     navigator.clipboard.writeText(content);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
+  };
+
+  const handleToggleSpeak = () => {
+    if (speaking) {
+      stopSpeaking();
+      setSpeaking(false);
+    } else {
+      speakText(content, {
+        onStart: () => setSpeaking(true),
+        onEnd: () => setSpeaking(false),
+      });
+    }
   };
 
   return (
@@ -193,18 +207,34 @@ export default function ChatMessage({
           </div>
 
           {isAssistant && content && (
-            <button
-              type="button"
-              onClick={handleCopy}
-              className="mt-2 opacity-0 group-hover:opacity-100 transition-opacity text-gray-500 hover:text-emerald-300"
-              title="Copy response"
-            >
-              {copied ? (
-                <Check className="w-4 h-4 text-emerald-400" />
-              ) : (
-                <Copy className="w-4 h-4" />
+            <div className="mt-2 flex items-center gap-3 opacity-0 group-hover:opacity-100 transition-opacity">
+              <button
+                type="button"
+                onClick={handleCopy}
+                className="text-gray-500 hover:text-emerald-300"
+                title="Copy response"
+              >
+                {copied ? (
+                  <Check className="w-4 h-4 text-emerald-400" />
+                ) : (
+                  <Copy className="w-4 h-4" />
+                )}
+              </button>
+              {isSpeechSynthesisSupported() && (
+                <button
+                  type="button"
+                  onClick={handleToggleSpeak}
+                  className="text-gray-500 hover:text-cyan-300"
+                  title={speaking ? "Stop speaking" : "Read response aloud (0 KB storage)"}
+                >
+                  {speaking ? (
+                    <VolumeX className="w-4 h-4 text-cyan-400" />
+                  ) : (
+                    <Volume2 className="w-4 h-4" />
+                  )}
+                </button>
               )}
-            </button>
+            </div>
           )}
         </div>
       </div>

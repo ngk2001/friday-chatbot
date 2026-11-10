@@ -7,8 +7,14 @@ import {
   ImagePlus,
   X,
   HardDrive,
+  Mic,
+  MicOff,
 } from "lucide-react";
 import { compressImageFile, CompressedImage } from "@/lib/imageUtils";
+import {
+  BrowserSpeechRecognition,
+  createSpeechRecognition,
+} from "@/lib/voiceUtils";
 
 interface ChatInputProps {
   onSend: (
@@ -33,8 +39,45 @@ export default function ChatInput({
   const [saveImageToHistory, setSaveImageToHistory] = useState(true);
   const [isDragging, setIsDragging] = useState(false);
   const [compressing, setCompressing] = useState(false);
+  const [isListening, setIsListening] = useState(false);
+  const [voiceSupported, setVoiceSupported] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const recognitionRef = useRef<BrowserSpeechRecognition | null>(null);
+
+  useEffect(() => {
+    const win = window as unknown as {
+      SpeechRecognition?: unknown;
+      webkitSpeechRecognition?: unknown;
+    };
+    setVoiceSupported(Boolean(win.SpeechRecognition || win.webkitSpeechRecognition));
+    return () => {
+      recognitionRef.current?.stop();
+    };
+  }, []);
+
+  const toggleVoiceInput = () => {
+    if (isListening) {
+      recognitionRef.current?.stop();
+      setIsListening(false);
+      return;
+    }
+    const rec = createSpeechRecognition();
+    if (!rec) return;
+    const baseText = input.trim();
+    rec.onresult = (event) => {
+      let transcript = "";
+      for (let i = 0; i < event.results.length; i++) {
+        transcript += event.results[i][0]?.transcript || "";
+      }
+      setInput(baseText ? `${baseText} ${transcript}` : transcript);
+    };
+    rec.onerror = () => setIsListening(false);
+    rec.onend = () => setIsListening(false);
+    recognitionRef.current = rec;
+    rec.start();
+    setIsListening(true);
+  };
 
   useEffect(() => {
     if (textareaRef.current) {
@@ -170,8 +213,8 @@ export default function ChatInput({
               : "bg-gray-900 border-gray-700 focus-within:border-gray-500"
           }`}
         >
-          {/* Image Upload Button */}
-          <div className="flex items-center pl-3 pb-3">
+          {/* Image Upload & Voice Input Buttons */}
+          <div className="flex items-center gap-1 pl-3 pb-3">
             <input
               ref={fileInputRef}
               type="file"
@@ -195,6 +238,31 @@ export default function ChatInput({
             >
               <ImagePlus className="w-4 h-4" />
             </button>
+
+            {voiceSupported && (
+              <button
+                type="button"
+                onClick={toggleVoiceInput}
+                title={
+                  isListening
+                    ? "Stop voice input"
+                    : "Voice input (0 KB storage — browser speech-to-text)"
+                }
+                className={`p-1.5 rounded-lg transition-colors ${
+                  isListening
+                    ? "bg-red-500/20 text-red-400 animate-pulse"
+                    : cypherMode
+                    ? "text-cyan-400/80 hover:text-cyan-300 hover:bg-cyan-500/10"
+                    : "text-gray-400 hover:text-white hover:bg-gray-800"
+                }`}
+              >
+                {isListening ? (
+                  <MicOff className="w-4 h-4" />
+                ) : (
+                  <Mic className="w-4 h-4" />
+                )}
+              </button>
+            )}
           </div>
 
           <textarea

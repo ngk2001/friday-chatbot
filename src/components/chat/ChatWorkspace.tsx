@@ -12,7 +12,10 @@ import {
   Terminal,
   Eye,
   Shield,
+  Volume2,
+  VolumeX,
 } from "lucide-react";
+import { speakText, stopSpeaking } from "@/lib/voiceUtils";
 import ChatMessage from "@/components/chat/ChatMessage";
 import ChatInput from "@/components/chat/ChatInput";
 import ModelSelector, { MODELS } from "@/components/chat/ModelSelector";
@@ -74,7 +77,9 @@ export default function ChatWorkspace({
   const [config, setConfig] = useState<AssistantConfigData>(DEFAULT_CONFIG);
   const [trainerOpen, setTrainerOpen] = useState(false);
   const [cypherMode, setCypherMode] = useState(true);
+  const [autoVoice, setAutoVoice] = useState(false);
   const [initialLoading, setInitialLoading] = useState(Boolean(initialChatId));
+  const wasLoadingRef = useRef(false);
 
   const { messages, setMessages, sendMessage, isLoading, error, stop } =
     useFridayChat({
@@ -146,6 +151,17 @@ export default function ChatWorkspace({
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
+  // Auto-speak completed assistant reply when VOICE:ON
+  useEffect(() => {
+    if (wasLoadingRef.current && !isLoading && autoVoice) {
+      const last = messages[messages.length - 1];
+      if (last?.role === "assistant" && last.content) {
+        speakText(last.content);
+      }
+    }
+    wasLoadingRef.current = isLoading;
+  }, [isLoading, messages, autoVoice]);
+
   if (initialLoading) {
     return (
       <div className="flex items-center justify-center h-full">
@@ -192,6 +208,31 @@ export default function ChatWorkspace({
         </div>
 
         <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => {
+              setAutoVoice((prev) => {
+                if (prev) stopSpeaking();
+                return !prev;
+              });
+            }}
+            className={`flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-mono rounded-xl border transition-colors ${
+              autoVoice
+                ? "bg-cyan-500/15 border-cyan-500/40 text-cyan-300"
+                : "bg-gray-900 border-gray-700 text-gray-300 hover:text-white"
+            }`}
+            title="Auto-speak F.R.I.D.A.Y responses (0 KB storage)"
+          >
+            {autoVoice ? (
+              <Volume2 className="w-3.5 h-3.5" />
+            ) : (
+              <VolumeX className="w-3.5 h-3.5" />
+            )}
+            <span className="hidden sm:inline">
+              {autoVoice ? "VOICE:ON" : "VOICE:OFF"}
+            </span>
+          </button>
+
           <button
             type="button"
             onClick={() => setCypherMode((v) => !v)}
