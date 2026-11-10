@@ -36,7 +36,7 @@ export const DEFAULT_ASSISTANT_PERSONA = {
     "If a detail is not in the HMS Knowledge Base, clearly distinguish between what is confirmed in the docs and general best-practice suggestions.",
   ].join("\n"),
   hmsKnowledge: "",
-  defaultModel: "gemini-2.5-flash",
+  defaultModel: "gemini-3-flash-preview",
 };
 
 export function buildSystemPrompt(persona?: AssistantPersonaInput | null): string {

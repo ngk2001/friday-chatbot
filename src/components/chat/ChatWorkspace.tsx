@@ -93,8 +93,10 @@ export default function ChatWorkspace({
         if (res.ok) {
           const data = await res.json();
           setConfig(data);
-          if (data.defaultModel) {
+          if (data.defaultModel && MODELS.some((m) => m.id === data.defaultModel)) {
             setSelectedModel(data.defaultModel);
+          } else {
+            setSelectedModel(MODELS[0].id);
           }
         }
       } catch (err) {
@@ -165,7 +167,7 @@ export default function ChatWorkspace({
 
       {/* Header */}
       <header
-        className={`relative z-10 flex flex-wrap items-center justify-between gap-2 px-4 py-2.5 border-b backdrop-blur-xl ${
+        className={`relative z-30 flex flex-wrap items-center justify-between gap-2 px-4 py-2.5 border-b backdrop-blur-xl ${
           cypherMode
             ? "border-emerald-500/20 bg-gray-950/85"
             : "border-gray-800 bg-gray-950/80"

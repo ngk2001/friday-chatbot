@@ -7,7 +7,9 @@ import { checkRateLimit } from "@/lib/rateLimit";
 export const maxDuration = 60;
 
 const MAX_CONTEXT_MESSAGES = 20;
-const MAX_IMAGE_CHARS = 1_500_000; // ~1.1 MB decoded image ceiling
+const MAX_IMAGE_CHARS = 1_500_000;
+const DEFAULT_GEMINI_MODEL = "gemini-3-flash-preview";
+const FIRST_CHUNK_TIMEOUT_MS = 12_000;
 
 interface IncomingMessage {
   role: "user" | "assistant" | "system";
@@ -15,45 +17,90 @@ interface IncomingMessage {
   imageData?: string | null;
 }
 
-function resolveAvailableModel(requestedModel: string, hasImage: boolean): {
-  modelId: string | null;
-  error?: string;
-} {
+function normalizeModelId(requestedModel: string): string {
+  // Replace deprecated model IDs automatically
+  if (!requestedModel || requestedModel === "gemini-2.5-flash") {
+    return DEFAULT_GEMINI_MODEL;
+  }
+  if (requestedModel === "gemini-2.0-flash") {
+    return "gemini-flash-lite-latest";
+  }
+  if (requestedModel === "gemini-2.5-pro") {
+    return "gemini-3.1-pro-preview";
+  }
+  return requestedModel;
+}
+
+function buildFallbackQueue(primaryModel: string, hasImage: boolean): string[] {
   const hasGemini = Boolean(process.env.GOOGLE_GENERATIVE_AI_API_KEY);
   const hasGroq = Boolean(process.env.GROQ_API_KEY);
+  const candidates: string[] = [];
 
   if (hasImage) {
-    if (!hasGemini) {
-      return {
-        modelId: null,
-        error:
-          "Image analysis requires GOOGLE_GENERATIVE_AI_API_KEY in your environment variables.",
-      };
+    if (hasGemini) {
+      if (primaryModel.startsWith("gemini")) candidates.push(primaryModel);
+      for (const m of [DEFAULT_GEMINI_MODEL, "gemini-flash-lite-latest"]) {
+        if (!candidates.includes(m)) candidates.push(m);
+      }
     }
-    return {
-      modelId: requestedModel.startsWith("gemini")
-        ? requestedModel
-        : "gemini-2.5-flash",
-    };
+    return candidates;
   }
 
-  if (requestedModel.startsWith("gemini")) {
-    if (hasGemini) return { modelId: requestedModel };
-    if (hasGroq) return { modelId: "llama-3.3-70b-versatile" };
-    return {
-      modelId: null,
-      error:
-        "Missing GOOGLE_GENERATIVE_AI_API_KEY (or GROQ_API_KEY fallback) in environment variables.",
-    };
+  if (primaryModel.startsWith("gemini")) {
+    if (hasGemini) {
+      candidates.push(primaryModel);
+      for (const m of [DEFAULT_GEMINI_MODEL, "gemini-flash-lite-latest"]) {
+        if (!candidates.includes(m)) candidates.push(m);
+      }
+    }
+    if (hasGroq) candidates.push("llama-3.3-70b-versatile");
+    return candidates;
   }
 
-  if (hasGroq) return { modelId: requestedModel };
-  if (hasGemini) return { modelId: "gemini-2.5-flash" };
-  return {
-    modelId: null,
-    error:
-      "Missing GROQ_API_KEY (or GOOGLE_GENERATIVE_AI_API_KEY fallback) in environment variables.",
-  };
+  if (hasGroq) candidates.push(primaryModel);
+  if (hasGemini) {
+    candidates.push(DEFAULT_GEMINI_MODEL, "gemini-flash-lite-latest");
+  }
+  return candidates;
+}
+
+async function openVerifiedStream(
+  modelId: string,
+  system: string,
+  messages: ModelMessage[]
+) {
+  let streamError: unknown = null;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), FIRST_CHUNK_TIMEOUT_MS);
+
+  try {
+    const result = streamText({
+      model: getModel(modelId),
+      system,
+      messages,
+      maxRetries: 0,
+      abortSignal: controller.signal,
+      onError: ({ error }) => {
+        streamError = error;
+      },
+    });
+
+    const iterator = result.textStream[Symbol.asyncIterator]();
+    const first = await iterator.next();
+    clearTimeout(timer);
+
+    if (streamError) {
+      throw streamError;
+    }
+    if (first.done) {
+      throw new Error(`Model ${modelId} returned an empty response.`);
+    }
+
+    return { firstChunk: first.value, iterator };
+  } catch (err) {
+    clearTimeout(timer);
+    throw err;
+  }
 }
 
 export async function POST(req: Request) {
@@ -83,7 +130,7 @@ export async function POST(req: Request) {
     const {
       messages,
       chatId,
-      model: requestedModel = "gemini-2.5-flash",
+      model: rawModel = DEFAULT_GEMINI_MODEL,
       saveImage = true,
     }: {
       messages: IncomingMessage[];
@@ -109,17 +156,21 @@ export async function POST(req: Request) {
       );
     }
 
-    // Keep context window lean (last 20 turns) and only attach image bytes from the latest turn
     const recentMessages = messages.slice(-MAX_CONTEXT_MESSAGES);
     const lastIndex = recentMessages.length - 1;
     const hasLatestImage = Boolean(recentMessages[lastIndex]?.imageData);
+    const normalizedModel = normalizeModelId(rawModel);
+    const candidates = buildFallbackQueue(normalizedModel, hasLatestImage);
 
-    const resolved = resolveAvailableModel(requestedModel, hasLatestImage);
-    if (!resolved.modelId) {
-      return new Response(JSON.stringify({ error: resolved.error }), {
-        status: 400,
-        headers: { "Content-Type": "application/json" },
-      });
+    if (candidates.length === 0) {
+      return new Response(
+        JSON.stringify({
+          error: hasLatestImage
+            ? "Image analysis requires GOOGLE_GENERATIVE_AI_API_KEY in .env.local."
+            : "No AI provider key configured. Add GOOGLE_GENERATIVE_AI_API_KEY or GROQ_API_KEY in .env.local.",
+        }),
+        { status: 400, headers: { "Content-Type": "application/json" } }
+      );
     }
 
     const assistantConfig = await prisma.assistantConfig.findUnique({
@@ -196,44 +247,75 @@ export async function POST(req: Request) {
     });
 
     const systemPrompt = buildSystemPrompt(assistantConfig);
-    let activeModelId = resolved.modelId;
 
-    const runStream = (modelId: string) =>
-      streamText({
-        model: getModel(modelId),
-        system: systemPrompt,
-        messages: formattedMessages,
-        onFinish: async ({ text }) => {
-          if (text) {
+    // Try primary model then fallback models until first token succeeds
+    let activeModelId = candidates[0];
+    let opened: { firstChunk: string; iterator: AsyncIterator<string> } | null =
+      null;
+    let lastError: unknown = null;
+
+    for (const candidate of candidates) {
+      try {
+        opened = await openVerifiedStream(
+          candidate,
+          systemPrompt,
+          formattedMessages
+        );
+        activeModelId = candidate;
+        break;
+      } catch (err) {
+        lastError = err;
+        console.warn(`Model ${candidate} failed, trying fallback:`, err);
+      }
+    }
+
+    if (!opened) {
+      const msg =
+        lastError instanceof Error
+          ? lastError.message
+          : "All configured AI models failed to respond.";
+      return new Response(JSON.stringify({ error: msg }), {
+        status: 502,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
+    const encoder = new TextEncoder();
+    const { firstChunk, iterator } = opened;
+    let fullText = firstChunk;
+
+    const stream = new ReadableStream({
+      async start(controller) {
+        try {
+          controller.enqueue(encoder.encode(firstChunk));
+          while (true) {
+            const next = await iterator.next();
+            if (next.done) break;
+            if (next.value) {
+              fullText += next.value;
+              controller.enqueue(encoder.encode(next.value));
+            }
+          }
+          if (fullText) {
             await prisma.message.create({
               data: {
                 chatId: chat.id,
                 role: "assistant",
-                content: text,
+                content: fullText,
               },
             });
           }
-        },
-      });
+          controller.close();
+        } catch (err) {
+          controller.error(err);
+        }
+      },
+    });
 
-    let result;
-    try {
-      result = runStream(activeModelId);
-    } catch (primaryErr) {
-      // Automatic fallback from Gemini -> Groq (or vice versa) on text requests
-      if (!hasLatestImage && activeModelId.startsWith("gemini") && process.env.GROQ_API_KEY) {
-        activeModelId = "llama-3.3-70b-versatile";
-        result = runStream(activeModelId);
-      } else if (!hasLatestImage && !activeModelId.startsWith("gemini") && process.env.GOOGLE_GENERATIVE_AI_API_KEY) {
-        activeModelId = "gemini-2.5-flash";
-        result = runStream(activeModelId);
-      } else {
-        throw primaryErr;
-      }
-    }
-
-    return result.toTextStreamResponse({
+    return new Response(stream, {
+      status: 200,
       headers: {
+        "Content-Type": "text/plain; charset=utf-8",
         "X-Chat-Id": chat.id,
         "X-Effective-Model": activeModelId,
       },
