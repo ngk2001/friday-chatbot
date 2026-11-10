@@ -29,19 +29,13 @@ export const authConfig: NextAuthConfig = {
     strategy: "jwt",
   },
   callbacks: {
-    async jwt({ token, user }: { token: Record<string, unknown>; user?: { id?: string } }) {
+    async jwt({ token, user }) {
       if (user?.id) {
         token.id = user.id;
       }
       return token;
     },
-    async session({
-      session,
-      token,
-    }: {
-      session: { user?: { id?: string; name?: string | null; email?: string | null; image?: string | null } };
-      token: Record<string, unknown>;
-    }) {
+    async session({ session, token }) {
       if (session.user && token.id) {
         session.user.id = token.id as string;
       }
